@@ -6,7 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from typing import List
+from typing import List, Union
 
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -19,43 +19,104 @@ from sqlalchemy.orm import joinedload
 from .. import models
 from ..database import SessionLocal
 
-def send_email_with_attachment(subject, body, to_addr, from_addr, password, file_path):
+def send_email_with_attachment(subject: str, body: str, to_addr: Union[str, List[str]], from_addr: str, password: str, file_path: str, cc_emails: List[str] = None, ccn_emails: List[str] = None):
+    """Invia un'email con un allegato PDF."""
+    db = None # Inizializza db a None per la gestione del finally
     try:
+        # Assumendo che SessionLocal() restituisca un oggetto sessione diretto
+        # Se SessionLocal è un context manager (cioè supporta 'with'), usa:
+        # with SessionLocal() as db:
         db = SessionLocal()
-        """Invia un'email con un allegato PDF."""
+        
         msg = MIMEMultipart()
         msg['From'] = from_addr
-        msg['To'] = to_addr
-        msg['Subject'] = subject
+        
+        # Converte to_addr in una lista per uniformità
+        to_recipients = [to_addr] if isinstance(to_addr, str) else to_addr
+        # Filtra eventuali None o stringhe vuote dalla lista dei destinatari 'A'
+        to_recipients_filtered = [email for email in to_recipients if email]
+        
+        if not to_recipients_filtered:
+            print("Errore: Nessun destinatario 'A' valido specificato.")
+            return # Termina la funzione se non ci sono destinatari validi
+
+        msg['To'] = ", ".join(to_recipients_filtered)
+
+        # Inizializza la lista di tutti i destinatari a cui inviare l'email (TO, CC, BCC)
+        all_recipients_for_sendmail = list(to_recipients_filtered) 
+
+        if cc_emails: # Controlla se la lista esiste e non è None
+            cc_emails_filtered = [email for email in cc_emails if email] # Filtra None/stringhe vuote
+            if cc_emails_filtered:
+                msg['Cc'] = ", ".join(cc_emails_filtered)
+                all_recipients_for_sendmail.extend(cc_emails_filtered) # Aggiungi alla lista combinata
+
+        # I destinatari CCN (BCC) NON vengono aggiunti alle intestazioni del messaggio per motivi di privacy.
+        # Vengono passati SOLO al server SMTP.
+        if ccn_emails: # Controlla se la lista esiste e non è None
+            ccn_emails_filtered = [email for email in ccn_emails if email] # Filtra None/stringhe vuote
+            if ccn_emails_filtered:
+                all_recipients_for_sendmail.extend(ccn_emails_filtered) # Aggiungi alla lista combinata
+
+        # Aggiungi il corpo del testo
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
+        # Allega il file PDF
         with open(file_path, "rb") as attachment:
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(attachment.read())
-        encoders.encode_base64(part)
+        encoders.encode_base64(part) # Codifica il payload
         part.add_header('Content-Disposition', f"attachment; filename= {os.path.basename(file_path)}")
         msg.attach(part)
-        serverName = db.query(models.Config).filter(models.Config.key == 'SMTP_SERVER').first().value
-        serverPort = db.query(models.Config).filter(models.Config.key == 'SMTP_PORT').first().value
-        serverSSL = bool(db.query(models.Config).filter(models.Config.key == 'SMTP_SSL').first().value)
+
+        # Recupera la configurazione SMTP dal DB
+        serverName_obj = db.query(models.Config).filter(models.Config.key == 'SMTP_SERVER').first()
+        serverName = serverName_obj.value if serverName_obj else None
+
+        serverPort_obj = db.query(models.Config).filter(models.Config.key == 'SMTP_PORT').first()
+        # Assicurati che serverPort sia un int, con un fallback robusto
+        serverPort = int(serverPort_obj.value) if serverPort_obj and serverPort_obj.value and str(serverPort_obj.value).isdigit() else None
+
+        serverSSL_obj = db.query(models.Config).filter(models.Config.key == 'SMTP_SSL').first()
+        # Converte il valore del DB in un booleano in modo robusto
+        serverSSL = str(serverSSL_obj.value).lower() in ['true', '1'] if serverSSL_obj and serverSSL_obj.value is not None else False
+
+        if not all([serverName, serverPort is not None]):
+            print("Errore: Configurazione SMTP (Nome Server o Porta) non trovata o non valida nel database.")
+            return # Termina la funzione se la configurazione è mancante
+
         print(f"serverName: {serverName}, serverPort: {serverPort}, serverSSL: {serverSSL}")
+        
+        server = None # Inizializza la variabile server
         try:
             if serverSSL:
                 server = smtplib.SMTP_SSL(serverName, serverPort)
             else:
                 server = smtplib.SMTP(serverName, serverPort)
-                server.starttls()
+                server.starttls() # Abilita TLS per connessioni non SSL dirette
+            
             print("Connessione al server SMTP riuscita")
             server.login(from_addr, password)
-            text = msg.as_string()
-            server.sendmail(from_addr, to_addr, text)
-            server.quit()
-            print(f"Email con allegato inviata con successo a {to_addr}!")
+            text = msg.as_string() # Ottieni il messaggio come stringa completa
+            
+            # INVIA L'EMAIL: il secondo argomento deve contenere TUTTI i destinatari (TO, CC, BCC)
+            server.sendmail(from_addr, all_recipients_for_sendmail, text) 
+            
+            server.quit() # Chiudi la connessione SMTP
+            print(f"Email con allegato inviata con successo a {', '.join(all_recipients_for_sendmail)}!")
+        except smtplib.SMTPAuthenticationError as e:
+            print(f"Errore di autenticazione SMTP: Verifica username e password. Dettagli: {e}")
+            raise # Rilancia l'eccezione per notificare il chiamante
+        except smtplib.SMTPConnectError as e:
+            print(f"Errore di connessione SMTP: Verifica server e porta. Dettagli: {e}")
+            raise
         except Exception as e:
-            print(f"Errore nell'invio dell'email a {to_addr}: {e}")
+            print(f"Errore generico nell'invio dell'email: {e}")
+            raise
     finally:
-        db.close()
-
+        # Assicurati che la sessione del database sia chiusa anche in caso di errori
+        if db:
+            db.close()
 
 def send_plain_text_email(subject, body, to_addr, from_addr, password):
     """Invia una semplice email di testo senza allegati."""
@@ -133,17 +194,17 @@ def _header_footer(canvas, doc):
     
     canvas.restoreState()
 
-def generate_dp_pdf(dp_testa: models.DPTesta, dp_details: list[models.DPDetail], file_path: str, report_type: str, title_suffix: str = ""):
+def generate_dp_pdf(dp_testa: 'models.DPTesta', dp_details: list['models.DPDetail'], file_path: str, report_type: str, title_suffix: str = ""):
     """
     Genera un report PDF per il Daily Planning con layout professionale e differenziato.
     """
     doc = SimpleDocTemplate(file_path,
-                           pagesize=A4, # Impostato a Verticale (Portrait)
-                           rightMargin=0.5*inch, leftMargin=0.5*inch,
-                           topMargin=1.0*inch, bottomMargin=0.8*inch)
+                            pagesize=A4, # Impostato a Verticale (Portrait)
+                            rightMargin=0.5*inch, leftMargin=0.5*inch,
+                            topMargin=1.0*inch, bottomMargin=0.8*inch)
     
     # Passa dati personalizzati a intestazione/piè di pagina
-    doc.giorno = dp_testa.giorno
+    doc.giorno = dp_testa.giorno if dp_testa and dp_testa.giorno else None # Ensure giorno can be None
     doc.title_suffix = title_suffix
 
     story = []
@@ -155,11 +216,19 @@ def generate_dp_pdf(dp_testa: models.DPTesta, dp_details: list[models.DPDetail],
     styles.add(ParagraphStyle(name='TableCellCenter', parent=styles['Normal'], alignment=TA_CENTER))
 
     # --- Suddivisione attività per fascia oraria ---
-    am_details = sorted([d for d in dp_details if d.fasciaoraria.value == 'AM'], key=lambda x: (x.agpspm_user.last_name or "") if x.agpspm_user else "")
-    pm_details = sorted([d for d in dp_details if d.fasciaoraria.value == 'PM'], key=lambda x: (x.agpspm_user.last_name or "") if x.agpspm_user else "")
+    # Ensure dp_details is not None before filtering
+    details_to_process = dp_details if dp_details is not None else []
+
+    am_details = sorted([d for d in details_to_process if d.fasciaoraria and d.fasciaoraria.value == 'AM'], 
+                        key=lambda x: (x.agpspm_user.last_name or "") if x.agpspm_user else "")
+    pm_details = sorted([d for d in details_to_process if d.fasciaoraria and d.fasciaoraria.value == 'PM'], 
+                        key=lambda x: (x.agpspm_user.last_name or "") if x.agpspm_user else "")
 
     def create_timeslot_table(details, header_text):
         if not details:
+            story.append(Paragraph(header_text, styles['SubHeader']))
+            story.append(Paragraph("Nessuna attività pianificata per questa fascia oraria.", styles['Normal']))
+            story.append(Spacer(1, 0.2*inch))
             return
 
         story.append(Paragraph(header_text, styles['SubHeader']))
@@ -188,36 +257,64 @@ def generate_dp_pdf(dp_testa: models.DPTesta, dp_details: list[models.DPDetail],
 
         table_data = [table_header]
         for detail in details:
-            cliente_p = Paragraph(detail.sedi.cliente_ref.ragione_sociale if detail.sedi and detail.sedi.cliente_ref else "N/A", styles['TableCell'])
-            sede_p = Paragraph(detail.sedi.descrizione if detail.sedi and detail.sedi.descrizione.lower() != '(la stessa)' else "Sede Principale", styles['TableCell'])
+            # Cliente Name
+            cliente_name = "N/A"
+            if detail.sedi and detail.sedi.cliente_ref and detail.sedi.cliente_ref.ragione_sociale:
+                cliente_name = detail.sedi.cliente_ref.ragione_sociale
+            cliente_p = Paragraph(cliente_name, styles['TableCell'])
+
+            # Sede Description
+            sede_desc = "N/A"
+            if detail.sedi and detail.sedi.descrizione:
+                sede_desc = detail.sedi.descrizione
+                if sede_desc.lower() == '(la stessa)':
+                    sede_desc = "Sede Principale" # Specific business rule
+            sede_p = Paragraph(sede_desc, styles['TableCell'])
             
+            # Material Status
             material_status = detail.materialedisponibile.value if detail.materialedisponibile else 'N/D'
             material_color = colors.green if material_status == 'SI' else colors.red
             material_paragraph = Paragraph(f'<b><font color="{material_color.hexval()}">{material_status}</font></b>', styles['TableCellCenter'])
             
-            notes_p = Paragraph(detail.note or "", styles['TableCell'])
+            # Notes
+            notes_p = Paragraph(detail.note or "", styles['TableCell']) # Empty string for no notes is often preferred over N/A
 
             if report_type == 'office':
-                resource_text = f"{detail.agpspm_user.first_name or ''} {detail.agpspm_user.last_name or ''}"
+                # Resource Name
+                resource_text = "N/A"
+                if detail.agpspm_user:
+                    first_name = detail.agpspm_user.first_name or ""
+                    last_name = detail.agpspm_user.last_name or ""
+                    if first_name or last_name: # If at least one name part exists
+                        resource_text = f"{first_name} {last_name}".strip()
+                    if not resource_text: # If after strip, it's empty (e.g., only spaces or both names were empty)
+                        resource_text = "N/A"
                 resource_p = Paragraph(resource_text, styles['TableCell'])
                 
-                activity_cell_content = [Paragraph(detail.descrizionemanuale, styles['TableCellBold'])]
+                # Activity and Interventions for 'office'
+                activity_cell_content = [Paragraph(detail.descrizionemanuale or "N/A", styles['TableCellBold'])]
                 if detail.tipi_interventi_dettaglio:
                     for ti in detail.tipi_interventi_dettaglio:
                         desc = ti.tipo_intervento_ref.descrizione if ti.tipo_intervento_ref else "N/D"
-                        activity_cell_content.append(Paragraph(f"• {ti.qta}x - {desc}", styles['TableCellSmall']))
-                table_data.append([resource_p,cliente_p, sede_p, activity_cell_content, material_paragraph, notes_p])
+                        qta_text = str(ti.qta) if ti.qta is not None else "N/A" # Handle qta potentially null
+                        activity_cell_content.append(Paragraph(f"• {qta_text}x - {desc}", styles['TableCellSmall']))
+                else:
+                    activity_cell_content.append(Paragraph("<i>N/A</i>", styles['TableCellSmall'])) # No interventions
+                table_data.append([resource_p, cliente_p, sede_p, activity_cell_content, material_paragraph, notes_p])
             
             else: # report_type == 'resource'
-                activity_p = Paragraph(detail.descrizionemanuale, styles['TableCell'])
+                # Activity for 'resource'
+                activity_p = Paragraph(detail.descrizionemanuale or "N/A", styles['TableCell'])
                 
+                # Interventions for 'resource'
                 interventions_content = []
                 if detail.tipi_interventi_dettaglio:
                     for ti in detail.tipi_interventi_dettaglio:
                         desc = ti.tipo_intervento_ref.descrizione if ti.tipo_intervento_ref else "N/D"
-                        interventions_content.append(Paragraph(f"• {ti.qta}x - {desc}", styles['TableCellSmall']))
+                        qta_text = str(ti.qta) if ti.qta is not None else "N/A" # Handle qta potentially null
+                        interventions_content.append(Paragraph(f"• {qta_text}x - {desc}", styles['TableCellSmall']))
                 else:
-                    interventions_content.append(Paragraph("<i>Nessuno</i>", styles['TableCellSmall']))
+                    interventions_content.append(Paragraph("<i>N/A</i>", styles['TableCellSmall'])) # No interventions
                 table_data.append([cliente_p, sede_p, activity_p, interventions_content, material_paragraph, notes_p])
         
         table = Table(table_data, colWidths=colWidths)
@@ -243,7 +340,6 @@ def generate_dp_pdf(dp_testa: models.DPTesta, dp_details: list[models.DPDetail],
     create_timeslot_table(pm_details, "Attività Pomeriggio (PM)")
     
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
-
 
 def send_initial_dp_emails(dp_testa_id: int):
     """
@@ -271,9 +367,13 @@ def send_initial_dp_emails(dp_testa_id: int):
         # 1. Invia PDF completo agli uffici
         full_report_path = os.path.join(temp_dir, f"dp_report_completo_{dp_testa_id}.pdf")
         generate_dp_pdf(dp_testa, all_details, full_report_path, 'office', "Completo")
-        offices_emails = [] # Qui dovresti recuperare gli indirizzi email degli uffici dal database o da una configurazione
-        for email in offices_emails:
-            send_email_with_attachment(subject_prefix, "In allegato il report completo del Daily Planning.", email, from_addr, password, full_report_path)
+        offices_emails =  db.query(models.Config).filter(models.Config.key == 'EMAIL_CCN').first()
+        if offices_emails:
+            offices_emails = offices_emails.value.split(",")
+        else:
+            offices_emails = []
+
+        send_email_with_attachment(subject_prefix, "In allegato il report completo del Daily Planning.", offices_emails, from_addr, password, full_report_path)
 
 
         # 2. Invia PDF personalizzati alle risorse
@@ -313,6 +413,28 @@ def send_update_emails(dp_testa_id: int, affected_resources: List[str]):
         print(f"From: {from_addr}, Password: {password}")
         subject_prefix = f"AGGIORNAMENTO: Daily Planning del {dp_testa.giorno.strftime('%d/%m/%Y')}"
         temp_dir = tempfile.gettempdir()
+
+        all_details = db.query(models.DPDetail).options(
+            joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
+            joinedload(models.DPDetail.agpspm_user),
+            joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
+        ).filter(models.DPDetail.id_testata == dp_testa_id).all()
+
+        if not all_details: return
+
+        offices_emails =  db.query(models.Config).filter(models.Config.key == 'EMAIL_CCN').first()
+        if offices_emails:
+            offices_emails = offices_emails.value.split(",")
+        else:
+            offices_emails = []
+
+        full_report_path = os.path.join(temp_dir, f"dp_report_completo_{dp_testa_id}.pdf")
+        generate_dp_pdf(dp_testa, all_details, full_report_path, 'office', "Completo")
+
+        send_email_with_attachment(subject_prefix, "In allegato il report completo aggiornato del Daily Planning.", offices_emails, from_addr, password, full_report_path)
+
+        try: os.remove(full_report_path)
+        except OSError as e: print(f"Errore rimozione file: {e}")
 
         for resource_email in affected_resources:
             # Recupera i dettagli dell'utente per ottenere il nome

@@ -123,6 +123,14 @@ async def refresh_zoho_access_token_if_needed(db: Session = Depends(database.get
 # Endpoint simulati per le "viste" e le funzioni complesse.
 # Questi endpoint interagiscono con il tuo database locale.
 
+@router.get("/health", summary="Health Check")
+def health_check():
+    """
+    Un endpoint semplice per verificare se l'API è attiva e risponde.
+    """
+    return {"status": "ok", "message": "Backend is running!"}
+
+
 @router.get("/clients/", response_model=List[Dict[str, Any]])
 def get_clients_view(db: Session = Depends(database.get_db)):
     """

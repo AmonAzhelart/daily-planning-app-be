@@ -321,10 +321,14 @@ def get_pdf_report(dp_testa_id: int, db: Session = Depends(database.get_db)):
     if not db_dp_testa:
         raise HTTPException(status_code=404, detail="DP Testa non trovata")
 
-    # 2. Recupera tutti i dettagli associati con caricamento 'eager' delle relazioni
+    # 2. Recupera tutti i dettagli associati con caricamento 'eager' delle relazioni.
     #    Questo è fondamentale per evitare errori di sessione durante la generazione del PDF.
     all_details = db.query(models.DPDetail).options(
-        joinedload(models.DPDetail.sedi).joinedload(models.VistaClientiSedi.id_sede),
+        # --- FIX APPLIED HERE ---
+        # Load the related Sede, and for that Sede, load the related Cliente.
+        joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
+        
+        # These loads were already correct.
         joinedload(models.DPDetail.agpspm_user),
         joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
     ).filter(models.DPDetail.id_testata == dp_testa_id).all()
@@ -333,7 +337,7 @@ def get_pdf_report(dp_testa_id: int, db: Session = Depends(database.get_db)):
     pdf_buffer = io.BytesIO()
 
     # 4. Definisci il suffisso del titolo e il nome del file
-    revision_number = db_dp_testa.revisione -1 if db_dp_testa.revisione >0 else db_dp_testa.revisione or 1
+    revision_number = db_dp_testa.revisione -1 if db_dp_testa.revisione > 0 else db_dp_testa.revisione or 1
     title_suffix = f"Completo - Rev. {revision_number}"
     filename_date = db_dp_testa.giorno.strftime('%Y-%m-%d')
     download_filename = f"{filename_date}_rev{revision_number}.pdf"

@@ -17,6 +17,9 @@ class DPConfig(BaseModel):
     key: Optional[str]
     value: Optional[str]
     description: Optional[str] = None
+    
+    class Config:
+        orm_mode = True
 
 class DPTestaCreate(DPTestaBase):
     pass

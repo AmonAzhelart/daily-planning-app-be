@@ -9,11 +9,8 @@ from typing import List, Optional
 # Assumendo che questi file esistano nella cartella superiore (app/)
 from .. import models, schemas, database
 
-# Creiamo un router specifico per l'autenticazione
-router = APIRouter(
-    prefix="/auth",
-    tags=["Authentication"]
-)
+
+router = APIRouter()
 
 # Percorso della cartella condivisa dove la vecchia app PHP salverà i file
 OLD_SESSIONS_PATH = os.path.join(os.getcwd(), "vecchie_sessioni")
@@ -78,7 +75,8 @@ def bridge_login(request: Request, sid: str, db: Session = Depends(database.get_
     request.session['user_info'] = user_data_for_session
 
     # Reindirizza al componente di callback del frontend React
-    return RedirectResponse(url="http://localhost:3000/auth/callback")
+    redirectUri = os.getenv("REACT_APP_REDIRECT_URI", "http://localhost:3000/auth/callback")
+    return RedirectResponse(url=redirectUri)
 
 
 @router.get('/me', response_model=schemas.OauthUserResponse)
