@@ -15,7 +15,7 @@ from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from .. import models
 from ..database import SessionLocal
 
@@ -219,10 +219,22 @@ def generate_dp_pdf(dp_testa: 'models.DPTesta', dp_details: list['models.DPDetai
     # Ensure dp_details is not None before filtering
     details_to_process = dp_details if dp_details is not None else []
 
-    am_details = sorted([d for d in details_to_process if d.fasciaoraria and d.fasciaoraria.value == 'AM'], 
-                        key=lambda x: (x.agpspm_user.last_name or "") if x.agpspm_user else "")
-    pm_details = sorted([d for d in details_to_process if d.fasciaoraria and d.fasciaoraria.value == 'PM'], 
-                        key=lambda x: (x.agpspm_user.last_name or "") if x.agpspm_user else "")
+    def get_last_name(detail):
+        # agpspm_user è una lista di utenti, ordina per il primo cognome disponibile
+        if detail and isinstance(detail.agpspm_users, list) and len(detail.agpspm_users) > 0:
+            # Prendi il primo utente e il suo last_name
+            first_user = detail.agpspm_users[0]
+            return (first_user.last_name or "") if hasattr(first_user, "last_name") else ""
+        return ""
+
+    am_details = sorted(
+        [d for d in details_to_process if d.fasciaoraria and d.fasciaoraria.value == 'AM'],
+        key=get_last_name
+    )
+    pm_details = sorted(
+        [d for d in details_to_process if d.fasciaoraria and d.fasciaoraria.value == 'PM'],
+        key=get_last_name
+    )
 
     def create_timeslot_table(details, header_text):
         if not details:
@@ -257,6 +269,7 @@ def generate_dp_pdf(dp_testa: 'models.DPTesta', dp_details: list['models.DPDetai
 
         table_data = [table_header]
         for detail in details:
+           
             # Cliente Name
             cliente_name = "N/A"
             if detail.sedi and detail.sedi.cliente_ref and detail.sedi.cliente_ref.ragione_sociale:
@@ -281,15 +294,18 @@ def generate_dp_pdf(dp_testa: 'models.DPTesta', dp_details: list['models.DPDetai
 
             if report_type == 'office':
                 # Resource Name
-                resource_text = "N/A"
-                if detail.agpspm_user:
-                    first_name = detail.agpspm_user.first_name or ""
-                    last_name = detail.agpspm_user.last_name or ""
-                    if first_name or last_name: # If at least one name part exists
-                        resource_text = f"{first_name} {last_name}".strip()
-                    if not resource_text: # If after strip, it's empty (e.g., only spaces or both names were empty)
-                        resource_text = "N/A"
-                resource_p = Paragraph(resource_text, styles['TableCell'])
+                resource_name = "N/A"
+                # agpspm_user è ora un array (lista di utenti)
+                resource_names = []
+                if detail.agpspm_users:
+                    for user in detail.agpspm_users:
+                        first_name = user.first_name or ""
+                        last_name = user.last_name or ""
+                        full_name = f"{first_name} {last_name}".strip()
+                        if full_name:
+                            resource_names.append(full_name)
+                resource_name = ", ".join(resource_names) if resource_names else "N/A"
+                resource_p = Paragraph(resource_name, styles['TableCell'])
                 
                 # Activity and Interventions for 'office'
                 activity_cell_content = [Paragraph(detail.descrizionemanuale or "N/A", styles['TableCellBold'])]
@@ -348,16 +364,21 @@ def send_initial_dp_emails(dp_testa_id: int):
     db = SessionLocal()
     try:
         print(f"Avvio del processo di invio email INIZIALE per DP ID: {dp_testa_id}")
-        dp_testa = db.query(models.DPTesta).filter(models.DPTesta.id == dp_testa_id).first()
-        if not dp_testa: return
+        dp_testa = db.query(models.DPTesta).options(
+            selectinload(models.DPTesta.dettagli)
+            .selectinload(models.DPDetail.agpspm_associations)
+            .selectinload(models.DPDetailAGPSPM.agpspm_user),
+            selectinload(models.DPTesta.dettagli)
+            .selectinload(models.DPDetail.sedi)
+            .selectinload(models.Sede.cliente_ref),
+            selectinload(models.DPTesta.dettagli)
+            .selectinload(models.DPDetail.tipi_interventi_dettaglio)
+            .selectinload(models.DPDetailTI.tipo_intervento_ref)
+        ).filter(models.DPTesta.id == dp_testa_id).first()
 
-        all_details = db.query(models.DPDetail).options(
-            joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
-            joinedload(models.DPDetail.agpspm_user),
-            joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
-        ).filter(models.DPDetail.id_testata == dp_testa_id).all()
-
-        if not all_details: return
+        if not dp_testa or not dp_testa.dettagli:
+            print(f"Nessun DP trovato con ID {dp_testa_id}. Termino l'invio email iniziale.")
+            return
 
         from_addr = db.query(models.Config).filter(models.Config.key == 'SMTP_USER').first().value
         password = db.query(models.Config).filter(models.Config.key == 'SMTP_PASS').first().value
@@ -366,7 +387,7 @@ def send_initial_dp_emails(dp_testa_id: int):
 
         # 1. Invia PDF completo agli uffici
         full_report_path = os.path.join(temp_dir, f"dp_report_completo_{dp_testa_id}.pdf")
-        generate_dp_pdf(dp_testa, all_details, full_report_path, 'office', "Completo")
+        generate_dp_pdf(dp_testa, dp_testa.dettagli, full_report_path, 'office', "Completo")
         offices_emails =  db.query(models.Config).filter(models.Config.key == 'EMAIL_CCN').first()
         if offices_emails:
             offices_emails = offices_emails.value.split(",")
@@ -377,22 +398,22 @@ def send_initial_dp_emails(dp_testa_id: int):
 
 
         # 2. Invia PDF personalizzati alle risorse
-        tasks_by_email = defaultdict(list)
-        for detail in all_details:
-            if detail.id_agpspm: tasks_by_email[detail.id_agpspm].append(detail)
+        # tasks_by_email = defaultdict(list)
+        # for detail in all_details:
+        #     if detail.id_agpspm: tasks_by_email[detail.id_agpspm].append(detail)
         
-        for resource_email, tasks in tasks_by_email.items():
-            resource = tasks[0].agpspm_user
-            resource_name = resource.first_name if resource else resource_email
+        # for resource_email, tasks in tasks_by_email.items():
+        #     resource = tasks[0].agpspm_user
+        #     resource_name = resource.first_name if resource else resource_email
             
-            client_name_for_task = lambda d: d.sedi.cliente_ref.ragione_sociale if d.sedi and d.sedi.cliente_ref else "Cliente non specificato"
-            task_list_str = "\n".join([f"- {d.descrizionemanuale} presso {client_name_for_task(d)}" for d in tasks])
-            resource_body = f"Ciao {resource_name},\n\nQueste sono le tue attività del {dp_testa.giorno.strftime('%d/%m/%Y')}:\n{task_list_str}\n\nIn allegato il report del daily planning."
+        #     client_name_for_task = lambda d: d.sedi.cliente_ref.ragione_sociale if d.sedi and d.sedi.cliente_ref else "Cliente non specificato"
+        #     task_list_str = "\n".join([f"- {d.descrizionemanuale} presso {client_name_for_task(d)}" for d in tasks])
+        #     resource_body = f"Ciao {resource_name},\n\nQueste sono le tue attività del {dp_testa.giorno.strftime('%d/%m/%Y')}:\n{task_list_str}\n\nIn allegato il report del daily planning."
 
-            send_email_with_attachment(f"{subject_prefix} - Attività per {resource_name}", resource_body, resource_email, from_addr, password, full_report_path)
+        #     send_email_with_attachment(f"{subject_prefix} - Attività per {resource_name}", resource_body, resource_email, from_addr, password, full_report_path)
 
-        try: os.remove(full_report_path)
-        except OSError as e: print(f"Errore rimozione file: {e}")
+        # try: os.remove(full_report_path)
+        # except OSError as e: print(f"Errore rimozione file: {e}")
 
     finally:
         db.close()
@@ -406,21 +427,32 @@ def send_update_emails(dp_testa_id: int, affected_resources: List[str]):
     db = SessionLocal()
     try:
         print(f"Avvio invio email di AGGIORNAMENTO per DP ID: {dp_testa_id} alle risorse: {affected_resources}")
-        dp_testa = db.query(models.DPTesta).filter(models.DPTesta.id == dp_testa_id).first()
-        if not dp_testa: return
+
+        dp_testa = db.query(models.DPTesta).options(
+            selectinload(models.DPTesta.dettagli)
+            .selectinload(models.DPDetail.agpspm_associations)
+            .selectinload(models.DPDetailAGPSPM.agpspm_user),
+            selectinload(models.DPTesta.dettagli)
+            .selectinload(models.DPDetail.sedi)
+            .selectinload(models.Sede.cliente_ref),
+            selectinload(models.DPTesta.dettagli)
+            .selectinload(models.DPDetail.tipi_interventi_dettaglio)
+            .selectinload(models.DPDetailTI.tipo_intervento_ref)
+        ).filter(models.DPTesta.id == dp_testa_id).first()
+        
+        if not dp_testa:
+            print(f"Nessun DP trovato con ID {dp_testa_id}. Termino l'invio email di aggiornamento.")
+            return
+        if not dp_testa.dettagli: return
+
         from_addr = db.query(models.Config).filter(models.Config.key == 'SMTP_USER').first().value
         password = db.query(models.Config).filter(models.Config.key == 'SMTP_PASS').first().value
         print(f"From: {from_addr}, Password: {password}")
         subject_prefix = f"AGGIORNAMENTO: Daily Planning del {dp_testa.giorno.strftime('%d/%m/%Y')}"
         temp_dir = tempfile.gettempdir()
 
-        all_details = db.query(models.DPDetail).options(
-            joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
-            joinedload(models.DPDetail.agpspm_user),
-            joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
-        ).filter(models.DPDetail.id_testata == dp_testa_id).all()
 
-        if not all_details: return
+        
 
         offices_emails =  db.query(models.Config).filter(models.Config.key == 'EMAIL_CCN').first()
         if offices_emails:
@@ -429,45 +461,45 @@ def send_update_emails(dp_testa_id: int, affected_resources: List[str]):
             offices_emails = []
 
         full_report_path = os.path.join(temp_dir, f"dp_report_completo_{dp_testa_id}.pdf")
-        generate_dp_pdf(dp_testa, all_details, full_report_path, 'office', "Completo")
+        generate_dp_pdf(dp_testa, dp_testa.dettagli, full_report_path, 'office', "Completo")
 
         send_email_with_attachment(subject_prefix, "In allegato il report completo aggiornato del Daily Planning.", offices_emails, from_addr, password, full_report_path)
 
-        try: os.remove(full_report_path)
-        except OSError as e: print(f"Errore rimozione file: {e}")
+        # try: os.remove(full_report_path)
+        # except OSError as e: print(f"Errore rimozione file: {e}")
 
-        for resource_email in affected_resources:
-            # Recupera i dettagli dell'utente per ottenere il nome
-            resource_user = db.query(models.OauthUser).filter(models.OauthUser.username == resource_email).first()
-            resource_name = resource_user.first_name if resource_user else resource_email
+        # for resource_email in affected_resources:
+        #     # Recupera i dettagli dell'utente per ottenere il nome
+        #     resource_user = db.query(models.OauthUser).filter(models.OauthUser.username == resource_email).first()
+        #     resource_name = resource_user.first_name if resource_user else resource_email
 
-            # Controlla le nuove attività per la risorsa
-            tasks = db.query(models.DPDetail).options(
-                joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
-                joinedload(models.DPDetail.agpspm_user),
-                joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
-            ).filter(models.DPDetail.id_testata == dp_testa_id, models.DPDetail.id_agpspm == resource_email).all()
+        #     # Controlla le nuove attività per la risorsa
+        #     tasks = db.query(models.DPDetail).options(
+        #         joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
+        #         joinedload(models.DPDetail.agpspm_user),
+        #         joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
+        #     ).filter(models.DPDetail.id_testata == dp_testa_id, models.DPDetail.id_agpspm == resource_email).all()
 
-            if tasks:
-                # Caso 1: La risorsa ha ancora attività (o nuove attività)
-                body = f"Ciao {resource_name},\n\nLe tue attività per il giorno {dp_testa.giorno.strftime('%d/%m/%Y')} sono state aggiornate.\n\nControlla il PDF allegato per il tuo nuovo piano di lavoro."
-                report_path = os.path.join(temp_dir, f"dp_report_aggiornato_{dp_testa_id}_{resource_email.split('@')[0]}.pdf")
+        #     if tasks:
+        #         # Caso 1: La risorsa ha ancora attività (o nuove attività)
+        #         body = f"Ciao {resource_name},\n\nLe tue attività per il giorno {dp_testa.giorno.strftime('%d/%m/%Y')} sono state aggiornate.\n\nControlla il PDF allegato per il tuo nuovo piano di lavoro."
+        #         report_path = os.path.join(temp_dir, f"dp_report_aggiornato_{dp_testa_id}_{resource_email.split('@')[0]}.pdf")
 
-                all_details = db.query(models.DPDetail).options(
-                    joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
-                    joinedload(models.DPDetail.agpspm_user),
-                    joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
-                ).filter(models.DPDetail.id_testata == dp_testa_id).all()
+        #         all_details = db.query(models.DPDetail).options(
+        #             joinedload(models.DPDetail.sedi).joinedload(models.Sede.cliente_ref),
+        #             joinedload(models.DPDetail.agpspm_user),
+        #             joinedload(models.DPDetail.tipi_interventi_dettaglio).joinedload(models.DPDetailTI.tipo_intervento_ref)
+        #         ).filter(models.DPDetail.id_testata == dp_testa_id).all()
 
-                generate_dp_pdf(dp_testa, all_details, report_path, 'office', f"Aggiornato per {resource_name}")
+        #         generate_dp_pdf(dp_testa, all_details, report_path, 'office', f"Aggiornato per {resource_name}")
 
-                send_email_with_attachment(subject_prefix, body, resource_email, from_addr, password, report_path)
-                try: os.remove(report_path)
-                except OSError as e: print(f"Errore rimozione file: {e}")
-            else:
-                # Caso 2: Alla risorsa sono state rimosse tutte le attività
-                body = f"Ciao {resource_name},\n\nLe tue attività per il giorno {dp_testa.giorno.strftime('%d/%m/%Y')} sono state aggiornate.\nNon hai più attività assegnate per questa data."
-                send_plain_text_email(subject_prefix, body, resource_email, from_addr, password)
+        #         send_email_with_attachment(subject_prefix, body, resource_email, from_addr, password, report_path)
+        #         try: os.remove(report_path)
+        #         except OSError as e: print(f"Errore rimozione file: {e}")
+        #     else:
+        #         # Caso 2: Alla risorsa sono state rimosse tutte le attività
+        #         body = f"Ciao {resource_name},\n\nLe tue attività per il giorno {dp_testa.giorno.strftime('%d/%m/%Y')} sono state aggiornate.\nNon hai più attività assegnate per questa data."
+        #         send_plain_text_email(subject_prefix, body, resource_email, from_addr, password)
 
     finally:
         db.close()

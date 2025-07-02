@@ -1,5 +1,8 @@
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
+# Aggiornata starlette a una versione compatibile con 'secure', 'httponly', 'samesite' nel SessionMiddleware
+# FastAPI 0.111.0 è compatibile con Starlette >= 0.37.0
+starlette==0.37.2 
 sqlalchemy==2.0.30
 mysql-connector-python==8.4.0
 pydantic==1.10.13

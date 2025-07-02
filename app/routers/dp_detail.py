@@ -1,107 +1,121 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 from typing import List
 from .. import models, schemas, database
 from datetime import datetime
 
 router = APIRouter()
 
-# Endpoint per i dettagli del DP (Daily Planning Details)
-@router.post("/", response_model=schemas.DPDetailResponse)
+# --- FUNZIONE HELPER PER VALIDARE LE RISORSE ---
+def get_and_validate_agpspm_users(db: Session, usernames: List[str]) -> List[models.OauthUser]:
+    if not usernames:
+        return []
+    users = db.query(models.OauthUser).filter(models.OauthUser.username.in_(usernames)).all()
+    if len(users) != len(set(usernames)):
+        found_usernames = {user.username for user in users}
+        missing_usernames = set(usernames) - found_usernames
+        raise HTTPException(status_code=404, detail=f"Utenti AG/PS/PM non trovati: {', '.join(missing_usernames)}")
+    return users
+
+
+@router.post("/", response_model=schemas.DPDetailResponse, summary="Crea un nuovo dettaglio per un DP")
 def create_dp_detail(dp_detail: schemas.DPDetailCreate, db: Session = Depends(database.get_db)):
     """
-    Crea un nuovo dettaglio per un Daily Planning esistente.
+    Crea un nuovo dettaglio per un Daily Planning esistente, associando una o più risorse.
     """
-    # Verifica che la testata DP esista
-    dp_testa = db.query(models.DPTesta).filter(models.DPTesta.id == dp_detail.id_testata).first()
-    if dp_testa is None:
+    if not db.query(models.DPTesta).filter(models.DPTesta.id == dp_detail.id_testata).first():
         raise HTTPException(status_code=404, detail="DP Testa non trovata per l'ID fornito")
-
-    # Verifica che la sede esista se id_sede è fornito
-    if dp_detail.id_sede:
-        sede = db.query(models.Sede).filter(models.Sede.id == dp_detail.id_sede).first()
-        if sede is None:
-            raise HTTPException(status_code=404, detail="Sede non trovata per l'ID fornito")
+    
+    if dp_detail.id_sede and not db.query(models.Sede).filter(models.Sede.id == dp_detail.id_sede).first():
+        raise HTTPException(status_code=404, detail="Sede non trovata per l'ID fornito")
             
-    # Verifica che l'utente AG/PS/PM esista se id_agpspm è fornito
-    if dp_detail.id_agpspm:
-        agpspm_user = db.query(models.OauthUser).filter(models.OauthUser.username == dp_detail.id_agpspm).first()
-        if agpspm_user is None:
-            raise HTTPException(status_code=404, detail="Utente AG/PS/PM non trovato per l'username fornito")
+    validated_users = get_and_validate_agpspm_users(db, dp_detail.agpspm_users)
+    
+    # Crea l'oggetto senza agpspm_users perché verrà gestito tramite l'association proxy
+    detail_data = dp_detail.dict(exclude={'agpspm_users'})
+    db_dp_detail = models.DPDetail(**detail_data)
+    
+    # Assegna gli utenti tramite il proxy
+    db_dp_detail.agpspm_users = validated_users
 
-
-    db_dp_detail = models.DPDetail(
-        id_testata=dp_detail.id_testata,
-        caluid=dp_detail.caluid,
-        id_sede=dp_detail.id_sede,
-        id_agpspm=dp_detail.id_agpspm,
-        note=dp_detail.note,
-        fasciaoraria=dp_detail.fasciaoraria,
-        materialedisponibile=dp_detail.materialedisponibile,
-        descrizionemanuale=dp_detail.descrizionemanuale,
-        created=datetime.now(),
-        createdby=dp_detail.createdby if dp_detail.createdby else '',
-        modified=datetime.now(),
-        modifiedby=dp_detail.modifiedby if dp_detail.modifiedby else ''
-    )
     db.add(db_dp_detail)
     db.commit()
     db.refresh(db_dp_detail)
     return db_dp_detail
 
-@router.get("/by_dp_testa/{id_testata}", response_model=List[schemas.DPDetailResponse])
+
+@router.get("/by_dp_testa/{id_testata}", response_model=List[schemas.DPDetailResponse], summary="Recupera tutti i dettagli di un DP")
 def get_dp_details_by_dp_testa(id_testata: int, db: Session = Depends(database.get_db)):
     """
-    Recupera tutti i dettagli per una specifica testata del Daily Planning.
+    Recupera tutti i dettagli per una specifica testata del Daily Planning,
+    caricando in modo efficiente (eager loading) le risorse associate per evitare errori di validazione.
     """
-    details = db.query(models.DPDetail).filter(models.DPDetail.id_testata == id_testata).all()
+    details = (
+        db.query(models.DPDetail)
+        .filter(models.DPDetail.id_testata == id_testata)
+        .options(
+            # --- CORREZIONE APPLICATA ---
+            # Dobbiamo caricare la relazione reale, non il proxy.
+            # Il percorso corretto è: DPDetail -> agpspm_associations -> agpspm_user -> role
+            selectinload(models.DPDetail.agpspm_associations)
+            .selectinload(models.DPDetailAGPSPM.agpspm_user)
+            .selectinload(models.OauthUser.role)
+        )
+        .all()
+    )
+    # Anche se carichiamo 'agpspm_associations', Pydantic userà il proxy 'agpspm_users' 
+    # per la serializzazione, che ora avrà i dati pre-caricati.
     return details
 
-@router.put("/{dp_detail_id}", response_model=schemas.DPDetailResponse)
+
+@router.put("/{dp_detail_id}", response_model=schemas.DPDetailResponse, summary="Aggiorna un singolo dettaglio")
 def update_dp_detail(dp_detail_id: int, dp_detail: schemas.DPDetailUpdate, db: Session = Depends(database.get_db)):
     """
-    Aggiorna un dettaglio esistente del Daily Planning.hare on
+    Aggiorna un dettaglio esistente del Daily Planning.
     """
-    db_dp_detail = db.query(models.DPDetail).filter(models.DPDetail.id == dp_detail_id).first()
+    # Usiamo options anche qui per caricare le relazioni e averle disponibili dopo l'aggiornamento
+    db_dp_detail = db.query(models.DPDetail).options(
+        selectinload(models.DPDetail.agpspm_associations).selectinload(models.DPDetailAGPSPM.agpspm_user)
+    ).filter(models.DPDetail.id == dp_detail_id).first()
+    
     if db_dp_detail is None:
         raise HTTPException(status_code=404, detail="Dettaglio DP non trovato")
 
-    # Verifica che la sede esista se id_sede è fornito e non None
-    if dp_detail.id_sede is not None:
-        sede = db.query(models.Sede).filter(models.Sede.id == dp_detail.id_sede).first()
-        if sede is None:
-            raise HTTPException(status_code=404, detail="Sede non trovata per l'ID fornito")
-            
-    # Verifica che l'utente AG/PS/PM esista se id_agpspm è fornito e non None
-    if dp_detail.id_agpspm is not None:
-        agpspm_user = db.query(models.OauthUser).filter(models.OauthUser.username == dp_detail.id_agpspm).first()
-        if agpspm_user is None:
-            raise HTTPException(status_code=404, detail="Utente AG/PS/PM non trovato per l'username fornito")
-
     update_data = dp_detail.dict(exclude_unset=True)
+
+    # Gestione separata dell'aggiornamento delle risorse
+    if 'agpspm_users' in update_data:
+        usernames = update_data.pop('agpspm_users')
+        if usernames is not None:
+            validated_users = get_and_validate_agpspm_users(db, usernames)
+            db_dp_detail.agpspm_users = validated_users
+        else:
+            db_dp_detail.agpspm_users = []
+
+
+    if 'id_sede' in update_data and update_data['id_sede'] is not None:
+        if not db.query(models.Sede).filter(models.Sede.id == update_data['id_sede']).first():
+            raise HTTPException(status_code=404, detail="Sede non trovata per l'ID fornito")
+    
     for key, value in update_data.items():
-        # Mappa i nomi degli schemi Pydantic ai nomi delle colonne del modello SQLAlchemy
-        setattr(db_dp_detail, key, value) # Funziona perché i nomi dei campi negli schemi sono mappati ai nomi delle colonne
-        # Esempio: se nel Pydantic c'è 'caluid', e nel modello 'caluid', setattr funziona direttamente
+        setattr(db_dp_detail, key, value)
 
-    db_dp_detail.modified = datetime.now() # Aggiorna il timestamp di modifica
-
+    db_dp_detail.modified = datetime.now()
     db.commit()
     db.refresh(db_dp_detail)
     return db_dp_detail
 
-@router.delete("/{dp_detail_id}")
+
+@router.delete("/{dp_detail_id}", summary="Elimina un singolo dettaglio")
 def delete_dp_detail(dp_detail_id: int, db: Session = Depends(database.get_db)):
     """
-    Elimina un dettaglio specifico del Daily Planning e le tipologie di intervento correlate.
+    Elimina un dettaglio specifico del Daily Planning.
+    Le associazioni con utenti e tipi di intervento vengono eliminate in cascata.
     """
     db_dp_detail = db.query(models.DPDetail).filter(models.DPDetail.id == dp_detail_id).first()
     if db_dp_detail is None:
         raise HTTPException(status_code=404, detail="Dettaglio DP non trovato")
     
-    # Elimina le tipologie di intervento correlate
-    db.query(models.DPDetailTI).filter(models.DPDetailTI.id_dettaglio == dp_detail_id).delete()
-
     db.delete(db_dp_detail)
     db.commit()
-    return {"message": "Dettaglio DP e tipologie di intervento correlate eliminate con successo"}
+    return {"message": "Dettaglio DP e le relative associazioni sono stati eliminati con successo"}

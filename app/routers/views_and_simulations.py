@@ -391,6 +391,8 @@ async def get_zoho_events(
         raise HTTPException(status_code=500, detail=f"Errore inatteso durante il recupero degli eventi Zoho: {str(e)}")
 
     formatted_events = []
+    filtered_events.sort(key=lambda event: event.get("dateandtime", {}).get("start", ""))
+
     # Processa solo gli eventi filtrati e li formatta per il frontend
     for event in filtered_events:
         caluid = event.get("uid") # L'UID dell'evento Zoho

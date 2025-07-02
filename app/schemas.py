@@ -1,9 +1,82 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from datetime import date, datetime
 from typing import Optional, List
-from .models import DPStatus, FasciaOraria, MaterialeDisponibile # Importa gli Enum aggiornati
+from .models import DPStatus, FasciaOraria, MaterialeDisponibile
 
-# Pydantic Schemas per la validazione dei dati
+# --- Schemi di base riutilizzabili ---
+
+class RoleResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    class Config:
+        orm_mode = True
+
+class OauthUserResponse(BaseModel):
+    username: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: Optional[RoleResponse] = None
+    class Config:
+        orm_mode = True
+
+# --- Schema CORE per DPDetail senza campi conflittuali ---
+class DPDetailCore(BaseModel):
+    caluid: Optional[str] = None
+    id_sede: Optional[int] = None
+    note: Optional[str] = None
+    fasciaoraria: FasciaOraria
+    materialedisponibile: MaterialeDisponibile
+    descrizionemanuale: Optional[str] = None
+    createdby: Optional[str] = None
+    modifiedby: Optional[str] = None
+
+# --- Schemi per l'INPUT (usati nelle richieste POST/PUT) ---
+
+class DPDetailBase(DPDetailCore):
+    """Schema di base per l'input, si aspetta una lista di username."""
+    agpspm_users: List[str] = []
+
+class DPDetailCreate(DPDetailBase):
+    id_testata: int
+
+class DPDetailUpdate(BaseModel):
+    """Schema per l'aggiornamento parziale di un dettaglio."""
+    caluid: Optional[str] = None
+    id_sede: Optional[int] = None
+    descrizionemanuale: Optional[str] = None
+    note: Optional[str] = None
+    fasciaoraria: Optional[FasciaOraria] = None
+    materialedisponibile: Optional[MaterialeDisponibile] = None
+    modifiedby: Optional[str] = None
+    agpspm_users: Optional[List[str]] = None
+
+# --- Schemi per l'OUTPUT (usati nelle risposte GET) ---
+
+class DPDetailResponse(DPDetailCore):
+    """Schema per la risposta, restituisce una lista di oggetti utente completi."""
+    id: int
+    id_testata: int
+    created: datetime
+    modified: datetime
+    agpspm_users: List[OauthUserResponse] = []
+
+    # --- CORREZIONE APPLICATA (Sintassi per Pydantic v1) ---
+    # Usiamo il decoratore `validator` con `pre=True` che è l'equivalente
+    # di `mode='before'` in Pydantic v2.
+    @validator('agpspm_users', pre=True, always=True)
+    @classmethod
+    def handle_association_proxy(cls, v):
+        # Converte esplicitamente il proxy in una lista prima della validazione.
+        if v is not None:
+            return list(v)
+        return []
+
+    class Config:
+        orm_mode = True
+
+
+# --- Schemi per la Testa del DP (invariati ma mantenuti per completezza) ---
 
 class DPTestaBase(BaseModel):
     giorno: date
@@ -12,63 +85,39 @@ class DPTestaBase(BaseModel):
     createdby: Optional[str] = None
     modifiedby: Optional[str] = None
 
-class DPConfig(BaseModel):
-    id: int
-    key: Optional[str]
-    value: Optional[str]
-    description: Optional[str] = None
-    
-    class Config:
-        orm_mode = True
-
 class DPTestaCreate(DPTestaBase):
     pass
-
-class DPTestaUpdate(BaseModel):
-    stato: Optional[DPStatus] = None
-    revisione: Optional[int] = None
-    modifiedby: Optional[str] = None
 
 class DPTestaResponse(DPTestaBase):
     id: int
     created: datetime
     modified: datetime
-
     class Config:
         orm_mode = True
 
-class DPDetailBase(BaseModel):
+# --- PAYLOAD COMPLETI PER LE CHIAMATE API (DAL FRONTEND) ---
+
+class InterventionPayload(BaseModel):
+    id_tipi_interventi: int
+    qta: int
+
+class DPDetailPayload(BaseModel):
+    id: Optional[int] = None
     caluid: Optional[str] = None
     id_sede: Optional[int] = None
-    id_agpspm: Optional[str] = None
-    note: Optional[str] = None
+    descrizionemanuale: str
+    note: Optional[str]
     fasciaoraria: FasciaOraria
     materialedisponibile: MaterialeDisponibile
-    descrizionemanuale: Optional[str] = None
-    createdby: Optional[str] = None
-    modifiedby: Optional[str] = None
+    agpspm_users: List[str] = []
+    interventions: List[InterventionPayload] = []
 
-class DPDetailCreate(DPDetailBase):
-    id_testata: int
+class DPTestaUpdatePayload(BaseModel):
+    stato: DPStatus
+    modifiedby: str
+    details: Optional[List[DPDetailPayload]]
 
-class DPDetailUpdate(BaseModel):
-    caluid: Optional[str] = None
-    id_sede: Optional[int] = None
-    id_agpspm: Optional[str] = None
-    descrizionemanuale: Optional[str] = None
-    note: Optional[str] = None
-    fasciaoraria: Optional[FasciaOraria] = None
-    materialedisponibile: Optional[MaterialeDisponibile] = None
-    modifiedby: Optional[str] = None
-
-class DPDetailResponse(DPDetailBase):
-    id: int
-    id_testata: int
-    created: datetime
-    modified: datetime
-
-    class Config:
-        orm_mode = True
+# --- Tutti gli altri schemi che avevi, mantenuti per completezza ---
 
 class DPDetailTICreate(BaseModel):
     id_dettaglio: int
@@ -80,7 +129,6 @@ class DPDetailTIResponse(BaseModel):
     id_dettaglio: int
     id_tipi_interventi: int
     qta: int
-
     class Config:
         orm_mode = True
 
@@ -89,94 +137,35 @@ class LogEntry(BaseModel):
     description: str
     user: Optional[str] = "unknown"
 
-# Schemi per le tabelle sottostanti alle viste (se necessario esporle)
-class ClienteBase(BaseModel):
-    ragione_sociale: str
-
-class ClienteResponse(ClienteBase):
+class ClienteResponse(BaseModel):
     id: int
+    ragione_sociale: str
     class Config:
         orm_mode = True
 
-class SedeBase(BaseModel):
+class SedeResponse(BaseModel):
+    id: int
     id_cliente: int
     descrizione: Optional[str] = ""
     stato: Optional[str] = ""
     id_sap: Optional[int] = None
-
-class SedeResponse(SedeBase):
-    id: int
     class Config:
         orm_mode = True
 
-class TipoInterventoBase(BaseModel):
+class TipoInterventoResponse(BaseModel):
+    id: int
     descrizione: Optional[str] = None
-
-class TipoInterventoResponse(TipoInterventoBase):
-    id: int
     class Config:
         orm_mode = True
-
-class OauthUserBase(BaseModel):
-    username: str
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    role: int
-    active: Optional[int] = 1
-    super: Optional[int] = 0
-    gestione_congressi: Optional[int] = 0
-    hide_is_search: Optional[int] = 0
-    parent_id: Optional[str] = None
-
-class RoleBase(BaseModel):
-    id: int
-    name: str
-    description: Optional[str] = None
-    priority: Optional[int] = None
-
-
-class RoleResponse(BaseModel):
-    id: int
-    name: str
-    description: Optional[str] = None
-
-    class Config:
-        orm_mode = True
-
-class OauthUserResponse(BaseModel):
-    username: str
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    role: Optional[RoleResponse] = None # Il ruolo è opzionale e usa lo schema RoleResponse
-
-    class Config:
-        orm_mode = True        
-
-class InterventionPayload(BaseModel):
-    """Definisce un singolo tipo di intervento con la sua quantità."""
-    id_tipi_interventi: int
-    qta: int
-
-class DPDetailPayload(BaseModel):
-    """Definisce una riga di dettaglio completa, inviata dal frontend."""
-    id_sede: Optional[int]
-    id_agpspm: Optional[str]
-    descrizionemanuale: str
-    caluid:  Optional[str] = None
-    createdby: Optional[str] = None
-    modifiedby: Optional[str] = None
-    note: Optional[str]
-    fasciaoraria: FasciaOraria
-    materialedisponibile: MaterialeDisponibile
-    interventions: List[InterventionPayload] = []
-
-class DPTestaUpdatePayload(BaseModel):
-    """Definisce il payload completo per l'endpoint PUT."""
-    stato: DPStatus
-    modifiedby: str
-    details: Optional[List[DPDetailPayload]]
 
 class DPCloseResponse(BaseModel):
-    """Definisce la risposta standard dopo un'operazione di chiusura."""
     message: str
     stato: DPStatus
+
+class DPConfig(BaseModel):
+    id: int
+    key: Optional[str]
+    value: Optional[str]
+    description: Optional[str] = None
+    class Config:
+        orm_mode = True
