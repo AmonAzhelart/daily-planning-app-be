@@ -383,7 +383,8 @@ async def get_zoho_events(
     try:
         raw_events = await fetch_zoho_calendar_events(current_access_token, calendar_uid, _start_time, _end_time)
         # Filtra gli eventi per colore, mantenendo solo quelli con color: #AAD867
-        filtered_events = [event for event in raw_events if event.get("color") == "#AAD867"]
+        #[event for event in raw_events if event.get("color") == "#AAD867"]
+        filtered_events = raw_events
         print(f"Recuperati {len(raw_events)} eventi raw da Zoho Calendar per UID {calendar_uid}. Filtrati {len(filtered_events)} eventi con colore #AAD867.")
     except HTTPException as e:
         raise HTTPException(status_code=e.status_code, detail=f"Errore nel recupero degli eventi da Zoho: {e.detail}")
@@ -398,7 +399,7 @@ async def get_zoho_events(
         caluid = event.get("uid") # L'UID dell'evento Zoho
         title = event.get("title", "Nome Cliente Sconosciuto") # Il titolo dell'evento
         note = event.get("description", "") or event.get("note", "") # La descrizione dell'evento
-
+        color = event.get("color", "")
         event_start_datetime_str = event.get("dateandtime", {}).get("start")
         event_start_time = None
         if event_start_datetime_str:
@@ -421,7 +422,8 @@ async def get_zoho_events(
             "id_agpspm": None,
             "note": note,
             "fasciaoraria": fascia_oraria,
-            "materialedisponibile": materiale_disponibile
+            "materialedisponibile": materiale_disponibile,
+            "color": color,
         })
 
     return formatted_events # Restituisce la lista di eventi formattati direttamente al frontend

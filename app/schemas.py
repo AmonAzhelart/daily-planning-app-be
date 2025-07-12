@@ -1,4 +1,4 @@
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, validator, Field
 from datetime import date, datetime
 from typing import Optional, List
 from .models import DPStatus, FasciaOraria, MaterialeDisponibile
@@ -19,6 +19,50 @@ class OauthUserResponse(BaseModel):
     role: Optional[RoleResponse] = None
     class Config:
         orm_mode = True
+
+# ====================================================================
+# --- Schemi per la Gestione di Clienti e Sedi (NUOVO & AGGIORNATO) ---
+# ====================================================================
+
+# --- Schemi per le Sedi ---
+class SedeBase(BaseModel):
+    descrizione: str = Field(..., min_length=1, description="Descrizione della sede")
+
+class SedeCreate(SedeBase):
+    id_cliente: int
+
+class SedeUpdate(SedeBase):
+    pass # Permette di aggiornare tutti i campi di SedeBase
+
+class Sede(SedeBase):
+    id: int
+    id_cliente: int
+    class Config:
+        orm_mode = True
+
+# --- Schemi per i Clienti ---
+class ClienteBase(BaseModel):
+    ragione_sociale: str = Field(..., min_length=1, description="Nome del cliente")
+
+class ClienteUpdate(ClienteBase):
+    pass
+
+# Schema per la creazione di un cliente, che deve includere almeno una sede
+class SedeForClienteCreate(BaseModel):
+    descrizione: str = Field(..., min_length=1)
+
+class ClienteCreate(ClienteBase):
+    # Usiamo Field per validare che la lista non sia vuota
+    sedi: List[SedeForClienteCreate] = Field(..., min_items=1)
+
+# Schema per la risposta GET di un cliente con l'elenco delle sue sedi
+class Cliente(ClienteBase):
+    id: int
+    class Config:
+        orm_mode = True
+
+class ClienteWithSedi(Cliente):
+    sedi: List[Sede] = []
 
 # --- Schema CORE per DPDetail senza campi conflittuali ---
 class DPDetailCore(BaseModel):
@@ -158,6 +202,22 @@ class TipoInterventoResponse(BaseModel):
     class Config:
         orm_mode = True
 
+class TipoInterventoBase(BaseModel):
+    descrizione: str = Field(..., min_length=1, max_length=50)
+
+class TipoInterventoCreate(TipoInterventoBase):
+    pass
+
+class TipoInterventoUpdate(TipoInterventoBase):
+    pass
+
+class TipoIntervento(TipoInterventoBase):
+    id: int
+    is_used: bool # True se l'intervento è stato usato almeno una volta
+
+    class Config:
+        orm_mode = True
+
 class DPCloseResponse(BaseModel):
     message: str
     stato: DPStatus
@@ -167,5 +227,23 @@ class DPConfig(BaseModel):
     key: Optional[str]
     value: Optional[str]
     description: Optional[str] = None
+    class Config:
+        orm_mode = True
+
+class StatisticaTop10Clienti(BaseModel):
+    ragione_sociale: str
+    descrizione: Optional[str] = None
+    missioni: int
+
+    class Config:
+        orm_mode = True
+
+class StatisticaTop10Risorse(BaseModel):
+    id_agpspm: str
+    last_name: Optional[str] = None
+    first_name: Optional[str] = None
+    name: Optional[str] = None
+    missioni: int
+
     class Config:
         orm_mode = True

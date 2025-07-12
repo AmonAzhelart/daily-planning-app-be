@@ -117,7 +117,7 @@ class Cliente(Base):
     __tablename__ = "clienti"
     id = Column(Integer, primary_key=True, autoincrement=True)
     ragione_sociale = Column(Text, nullable=False)
-    sedi_associate = relationship("Sede", back_populates="cliente_ref")
+    sedi  = relationship("Sede", back_populates="cliente_ref", cascade="all, delete-orphan")
 
 class Sede(Base):
     __tablename__ = "sedi"
@@ -126,12 +126,13 @@ class Sede(Base):
     descrizione = Column(String(100), default='')
     stato = Column(CHAR(2), default='')
     id_sap = Column(Integer, nullable=True)
-    cliente_ref = relationship("Cliente", back_populates="sedi_associate")
+    cliente_ref = relationship("Cliente", back_populates="sedi")
 
 class TipoIntervento(Base):
     __tablename__ = "tipi_interventi"
     id = Column(Integer, primary_key=True)
     descrizione = Column(String(50), nullable=True)
+    details = relationship("DPDetailTI", back_populates="tipo_intervento_ref")
 
 class ZohoToken(Base):
     __tablename__ = "dp_zoho_tokens"
@@ -161,6 +162,20 @@ class DpVApspm(Base):
     role_name = Column(String, nullable=True)
     parent_last_name = Column(String, nullable=True)
     parent_first_name = Column(String, nullable=True)
+
+class StatisticaTop10Clienti(Base):
+    __tablename__ = "dp_v_stat_top_clienti"
+    ragione_sociale = Column(String(255), primary_key=True)
+    descrizione = Column(String(255), nullable=True)
+    missioni = Column(Integer, nullable=False)
+
+class StatisticaTop10Risorse(Base):
+    __tablename__ = "dp_v_stat_top_agpspm"
+    id_agpspm = Column(String(255), primary_key=True)
+    last_name = Column(String(255), nullable=True)
+    first_name = Column(String(255), nullable=True)
+    name = Column(String(255), nullable=True)
+    missioni = Column(Integer, nullable=False)
 
 class Config(Base):
     __tablename__ = "dp_config"

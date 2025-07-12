@@ -10,7 +10,7 @@ import sys
 import inspect
 
 # Importa tutti i router della tua applicazione
-from app.routers import dp_utility, oauth_user, dp_testata, dp_detail, dp_detail_ti, views_and_simulations
+from app.routers import clients, dp_utility, interventions, oauth_user, dp_testata, dp_detail, dp_detail_ti, report_and_statistics, views_and_simulations
 # Importa i componenti del database
 from .database import Base, engine
 
@@ -78,10 +78,12 @@ def on_startup():
 app.include_router(dp_testata.router, prefix="/dp_testata", tags=["DP Testata"])
 app.include_router(dp_detail.router, prefix="/dp_detail", tags=["DP Dettagli"])
 app.include_router(dp_detail_ti.router, prefix="/dp_detail_ti", tags=["DP Dettagli Tipologie Intervento"])
-app.include_router(views_and_simulations.router, tags=["Viste e Simulazioni"])
+app.include_router(views_and_simulations.router,prefix="/views", tags=["Viste e Simulazioni"])
 app.include_router(oauth_user.router, prefix="/auth", tags=["Authentication"])
 app.include_router(dp_utility.router, prefix="/dp_utility", tags=["DP Utility"])
-
+app.include_router(clients.router, prefix="/clients", tags=["Clienti e Sedi"])
+app.include_router(interventions.router, prefix="/interventions", tags=["Interventi"])
+app.include_router(report_and_statistics.router, prefix="/report_and_statistics", tags=["Report e Statistiche"])
 
 # --- ROUTE PRINCIPALE DI BENVENUTO ---
 
