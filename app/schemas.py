@@ -9,6 +9,7 @@ class RoleResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
+    priority: Optional[int] = None
     class Config:
         orm_mode = True
 
